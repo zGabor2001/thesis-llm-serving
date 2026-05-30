@@ -1,0 +1,26 @@
+services:
+  vllm:
+    image: vllm/vllm-openai-cpu:latest-x86_64
+    container_name: thesis-vllm-cpu
+    ipc: host
+    ports:
+      - "8000:8000"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      VLLM_LOGGING_LEVEL: INFO
+    volumes:
+      - ./models/base:/models/base
+      - ./models/loras:/models/loras
+      - ./logs:/logs
+      - ./traces:/traces
+      - ./configs:/configs
+    command: >
+      --model /models/base
+      --served-model-name base-model
+      --enable-lora
+      --max-loras 4
+      --max-lora-rank 64
+      --max-cpu-loras 8
+      --lora-modules tenant-a=/models/loras/tenant-a tenant-b=/models/loras/tenant-b tenant-c=/models/loras/tenant-c
+      --max-model-len 4096
+      --gpu-memory-utilization 0.5

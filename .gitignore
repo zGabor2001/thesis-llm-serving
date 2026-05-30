@@ -1,2 +1,8 @@
 .venv/
 .idea/
+*.pyc
+.env
+models/
+# local model artifacts
+models/
+*.safetensors

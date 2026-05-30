@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    VLLM_TARGET_DEVICE=cpu \
+    CUDA_VISIBLE_DEVICES="" \
+    VLLM_LOGGING_LEVEL=INFO
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ git cmake ninja-build curl numactl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
+RUN pip install vllm fastapi uvicorn
+
+WORKDIR /workspace
+EXPOSE 8000
+
+CMD ["vllm", "serve", "/models/base/base-model", "--served-model-name", "base-model"]
