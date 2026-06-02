@@ -9,7 +9,9 @@ from pydantic import BaseModel, Field
 
 from gateway.config import GatewayConfig
 from gateway.models import InferenceRequest
+from gateway.request_logger import RequestLogger
 from gateway.vllm_client import MockBackendClient, VLLMClient
+from gateway.dispatcher.dispatcher_factory import build_dispatcher
 
 
 class ChatMessage(BaseModel):
@@ -79,9 +81,21 @@ def to_openai_like_response(
 def build_app(
     config: GatewayConfig | None = None,
     backend_client: Any | None = None,
+    logger: RequestLogger | None = None,
+    tenant_weights: dict[str, int] | None = None,
+    scheduler_policy: str = "fifo",
+    tenant_quanta: dict[str, int] | None = None,
 ) -> FastAPI:
     cfg = config or GatewayConfig.from_env()
     client = backend_client or make_backend_client(cfg)
+    if logger is None:
+        logger = RequestLogger()
+    dispatcher = build_dispatcher(
+        backend_client,
+        policy=scheduler_policy,
+        tenant_weights=tenant_weights,
+        tenant_quanta=tenant_quanta,
+    )
 
     app = FastAPI(title="LLM Gateway Proxy", version="0.1.0")
 
@@ -132,8 +146,33 @@ def build_app(
             prompt_text=build_prompt_text(req.messages),
         )
 
+        logger.log(
+            "request_received",
+            request_id=inference_request.request_id,
+            tenant=tenant,
+            model=model,
+            arrival_ts=arrival_ts,
+            max_tokens=req.max_tokens,
+        )
+
         try:
-            result = client.complete(inference_request)
+            dispatch_out = dispatcher.dispatch(inference_request)
+            result = dispatch_out.result
+            dispatch_ts = dispatch_out.dispatch_ts
+            finish_ts = time.time()
+
+            logger.log(
+                "request_completed",
+                request_id=inference_request.request_id,
+                tenant=tenant,
+                model=model,
+                arrival_ts=arrival_ts,
+                dispatch_ts=dispatch_ts,
+                finish_ts=finish_ts,
+                status=getattr(result, "status", "completed"),
+                prompt_tokens=getattr(result, "prompt_tokens", 0),
+                generated_tokens=getattr(result, "generated_tokens", 0),
+            )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Backend completion failed: {exc}") from exc
 

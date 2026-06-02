@@ -3,6 +3,4 @@
 *.pyc
 .env
 models/
-# local model artifacts
-models/
 *.safetensors
