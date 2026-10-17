@@ -3,6 +3,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 @dataclass
 class GatewayConfig:
@@ -14,6 +18,7 @@ class GatewayConfig:
     request_timeout_s: float = 60.0
     scheduler_mode: str = "fifo"
     max_queue_size: int = 1024
+    max_concurrency: int = 32
     backend_ids: list[str] = field(default_factory=lambda: ["gpu-0"])
 
     @classmethod
@@ -27,5 +32,6 @@ class GatewayConfig:
             request_timeout_s=float(os.getenv("REQUEST_TIMEOUT_S", "60.0")),
             scheduler_mode=os.getenv("SCHEDULER_MODE", "fifo"),
             max_queue_size=int(os.getenv("MAX_QUEUE_SIZE", "1024")),
+            max_concurrency=int(os.getenv("MAX_CONCURRENCY", "32")),
             backend_ids=os.getenv("BACKEND_IDS", "gpu-0").split(","),
         )

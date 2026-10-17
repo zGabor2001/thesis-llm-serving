@@ -1,5 +1,33 @@
 from gateway.models import InferenceRequest
-from gateway.vllm_client import MockBackendClient, VLLMClient
+from gateway.vllm_client import MockBackendClient, VLLMClient, parse_sse_line
+
+
+def test_parse_sse_line_parses_data_done_and_garbage():
+    assert parse_sse_line('data: {"choices": [{"delta": {"content": "hi"}}]}') == {
+        "choices": [{"delta": {"content": "hi"}}]
+    }
+    assert parse_sse_line("data: [DONE]") == {"done": True}
+    assert parse_sse_line(": keep-alive") is None
+    assert parse_sse_line("data: not-json") is None
+
+
+def test_mock_backend_has_real_first_token_ts():
+    client = MockBackendClient(fixed_delay_s=0.01)
+    req = InferenceRequest(
+        request_id="r-ttft",
+        tenant="tenant-a",
+        model="base-model",
+        arrival_ts=0.0,
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=16,
+        prompt_text="Hello",
+        prompt_tokens=4,
+    )
+    result = client.complete(req)
+
+    assert result.first_token_ts is not None
+    assert result.first_token_ts < result.finish_ts
+    assert result.ttft is not None and result.ttft < result.latency
 
 
 def test_build_payload_minimal():

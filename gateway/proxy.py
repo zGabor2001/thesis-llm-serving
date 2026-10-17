@@ -32,7 +32,7 @@ def make_backend_client(cfg: GatewayConfig) -> Any:
     if cfg.backend_mode.lower() == "vllm":
         return VLLMClient(
             base_url=cfg.vllm_base_url,
-            timeout_s=cfg.request_timeout_s,
+            timeout=cfg.request_timeout_s,
         )
     return MockBackendClient()
 
@@ -42,6 +42,15 @@ def build_prompt_text(messages: list[ChatMessage]) -> str:
     if user_parts:
         return "\n".join(user_parts)
     return "\n".join(m.content for m in messages)
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token-count estimate without a tokenizer dependency.
+
+    ~4 characters per token is a common heuristic for English text. This is
+    used as the DRR request cost; swap in a real tokenizer for production.
+    """
+    return max(1, (len(text) + 3) // 4)
 
 
 def to_openai_like_response(
@@ -83,21 +92,24 @@ def build_app(
     backend_client: Any | None = None,
     logger: RequestLogger | None = None,
     tenant_weights: dict[str, int] | None = None,
-    scheduler_policy: str = "fifo",
+    scheduler_policy: str | None = None,
     tenant_quanta: dict[str, int] | None = None,
 ) -> FastAPI:
     cfg = config or GatewayConfig.from_env()
     client = backend_client or make_backend_client(cfg)
     if logger is None:
         logger = RequestLogger()
+    policy = scheduler_policy or cfg.scheduler_mode
     dispatcher = build_dispatcher(
-        backend_client,
-        policy=scheduler_policy,
+        client,
+        policy=policy,
         tenant_weights=tenant_weights,
         tenant_quanta=tenant_quanta,
+        max_concurrency=cfg.max_concurrency,
     )
 
     app = FastAPI(title="LLM Gateway Proxy", version="0.1.0")
+    app.state.dispatcher = dispatcher
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -134,6 +146,7 @@ def build_app(
         model = req.model or cfg.default_model
         arrival_ts = time.time()
 
+        prompt_text = build_prompt_text(req.messages)
         inference_request = InferenceRequest(
             request_id=str(uuid.uuid4()),
             tenant=tenant,
@@ -143,7 +156,8 @@ def build_app(
             max_tokens=req.max_tokens,
             temperature=req.temperature,
             metadata=req.metadata,
-            prompt_text=build_prompt_text(req.messages),
+            prompt_text=prompt_text,
+            prompt_tokens=estimate_tokens(prompt_text),
         )
 
         logger.log(
@@ -156,7 +170,9 @@ def build_app(
         )
 
         try:
-            dispatch_out = dispatcher.dispatch(inference_request)
+            dispatch_out = dispatcher.dispatch(
+                inference_request, timeout=cfg.request_timeout_s + 5
+            )
             result = dispatch_out.result
             dispatch_ts = dispatch_out.dispatch_ts
             finish_ts = time.time()
@@ -170,6 +186,7 @@ def build_app(
                 dispatch_ts=dispatch_ts,
                 finish_ts=finish_ts,
                 status=getattr(result, "status", "completed"),
+                first_token_ts=getattr(result, "first_token_ts", None),
                 prompt_tokens=getattr(result, "prompt_tokens", 0),
                 generated_tokens=getattr(result, "generated_tokens", 0),
             )

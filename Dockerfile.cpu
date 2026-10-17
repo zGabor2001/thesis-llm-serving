@@ -17,4 +17,4 @@ RUN pip install vllm fastapi uvicorn
 WORKDIR /workspace
 EXPOSE 8000
 
-CMD ["vllm", "serve", "/models/base/base-model", "--served-model-name", "base-model"]
+CMD ["vllm", "serve", "/models/base", "--served-model-name", "base-model"]

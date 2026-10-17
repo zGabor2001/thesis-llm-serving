@@ -2,5 +2,14 @@
 .idea/
 *.pyc
 .env
+logs/
 models/
+project-plan.md
 *.safetensors
+run/
+images/
+*.sif
+*.tar
+thesis.pdf
+thesis_proposal.pdf
+datalab_cluster_guide.md

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import json
 import time
-from dataclasses import asdict
 from typing import Any
 
 import requests
@@ -11,6 +11,20 @@ from .models import InferenceRequest, RequestResult
 
 class VLLMClientError(Exception):
     pass
+
+
+def parse_sse_line(line: str) -> dict | None:
+    """Parse one Server-Sent-Events ``data:`` line into a dict, or None."""
+    line = line.strip()
+    if not line.startswith("data:"):
+        return None
+    data = line[len("data:"):].strip()
+    if data == "[DONE]":
+        return {"done": True}
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError:
+        return None
 
 
 class VLLMClient:
@@ -41,6 +55,16 @@ class VLLMClient:
             json=payload,
             headers=self.default_headers,
             timeout=self.timeout,
+        )
+
+    def _post_stream(self, path: str, payload: dict[str, Any]) -> requests.Response:
+        url = f"{self.base_url}{path}"
+        return self.session.post(
+            url,
+            json=payload,
+            headers=self.default_headers,
+            timeout=self.timeout,
+            stream=True,
         )
 
     def health(self) -> bool:
@@ -91,76 +115,27 @@ class VLLMClient:
     def complete(self, req: InferenceRequest) -> RequestResult:
         dispatch_ts = time.time()
         payload = self.build_payload(req)
+        payload["stream"] = True
+        payload.setdefault("stream_options", {"include_usage": True})
 
         try:
-            response = self._post("/v1/chat/completions", payload)
-            finish_ts = time.time()
+            response = self._post_stream("/v1/chat/completions", payload)
         except requests.RequestException as e:
-            finish_ts = time.time()
-            return RequestResult(
-                request_id=req.request_id,
-                tenant=req.tenant,
-                model=req.model,
-                adapter=req.adapter,
-                arrival_ts=req.arrival_ts,
-                dispatch_ts=dispatch_ts,
-                finish_ts=finish_ts,
-                first_token_ts=None,
-                prompt_tokens=req.prompt_tokens,
-                generated_tokens=None,
-                temperature=req.temperature,
-                status="failed",
-                error=str(e),
-                response_text=None,
-                metadata={"exception_type": type(e).__name__},
-            )
+            return self._error_result(req, dispatch_ts, e)
 
         if response.status_code >= 400:
-            return RequestResult(
-                request_id=req.request_id,
-                tenant=req.tenant,
-                model=req.model,
-                adapter=req.adapter,
-                arrival_ts=req.arrival_ts,
-                dispatch_ts=dispatch_ts,
-                finish_ts=finish_ts,
-                first_token_ts=None,
-                prompt_tokens=req.prompt_tokens,
-                generated_tokens=None,
-                temperature=req.temperature,
-                status="failed",
-                error=response.text,
-                response_text=None,
-                metadata={"status_code": response.status_code},
+            return self._error_result(
+                req,
+                dispatch_ts,
+                VLLMClientError(f"status {response.status_code}: {response.text}"),
             )
 
-        body = response.json()
-        choices = body.get("choices", [])
-        if not choices:
-            return RequestResult(
-                request_id=req.request_id,
-                tenant=req.tenant,
-                model=req.model,
-                adapter=req.adapter,
-                arrival_ts=req.arrival_ts,
-                dispatch_ts=dispatch_ts,
-                finish_ts=finish_ts,
-                first_token_ts=None,
-                prompt_tokens=req.prompt_tokens,
-                generated_tokens=None,
-                temperature=req.temperature,
-                status="failed",
-                error="Missing choices in response",
-                response_text=None,
-                metadata={"raw_response": body},
-            )
+        try:
+            text, first_token_ts, usage = self._consume_stream(response)
+        except Exception as e:  # noqa: BLE001
+            return self._error_result(req, dispatch_ts, e)
 
-        message = choices[0].get("message", {})
-        text = message.get("content", "")
-
-        usage = body.get("usage", {})
-        prompt_tokens = usage.get("prompt_tokens", req.prompt_tokens)
-        generated_tokens = usage.get("completion_tokens")
+        finish_ts = time.time()
 
         return RequestResult(
             request_id=req.request_id,
@@ -170,19 +145,66 @@ class VLLMClient:
             arrival_ts=req.arrival_ts,
             dispatch_ts=dispatch_ts,
             finish_ts=finish_ts,
-            first_token_ts=finish_ts,
-            prompt_tokens=prompt_tokens,
-            generated_tokens=generated_tokens,
+            first_token_ts=first_token_ts,
+            prompt_tokens=usage.get("prompt_tokens", req.prompt_tokens),
+            generated_tokens=usage.get("completion_tokens"),
             temperature=req.temperature,
             status="completed",
             error=None,
             response_text=text,
             metadata={
                 "status_code": response.status_code,
-                "response_id": body.get("id"),
-                "object": body.get("object"),
+                "streamed": True,
                 "usage": usage,
             },
+        )
+
+    def _consume_stream(self, response: requests.Response) -> tuple[str, float | None, dict]:
+        text_parts: list[str] = []
+        first_token_ts: float | None = None
+        usage: dict[str, Any] = {}
+
+        for raw in response.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            chunk = parse_sse_line(raw)
+            if chunk is None or chunk.get("done"):
+                continue
+
+            choices = chunk.get("choices") or []
+            if choices:
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    if first_token_ts is None:
+                        first_token_ts = time.time()
+                    text_parts.append(content)
+
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+
+        return "".join(text_parts), first_token_ts, usage
+
+    def _error_result(
+        self, req: InferenceRequest, dispatch_ts: float, exc: Exception
+    ) -> RequestResult:
+        finish_ts = time.time()
+        return RequestResult(
+            request_id=req.request_id,
+            tenant=req.tenant,
+            model=req.model,
+            adapter=req.adapter,
+            arrival_ts=req.arrival_ts,
+            dispatch_ts=dispatch_ts,
+            finish_ts=finish_ts,
+            first_token_ts=None,
+            prompt_tokens=req.prompt_tokens,
+            generated_tokens=None,
+            temperature=req.temperature,
+            status="failed",
+            error=str(exc),
+            response_text=None,
+            metadata={"exception_type": type(exc).__name__},
         )
 
 
@@ -209,6 +231,7 @@ class MockBackendClient:
         dispatch_ts = time.time()
         time.sleep(self.fixed_delay_s)
         finish_ts = time.time()
+        first_token_ts = dispatch_ts + (finish_ts - dispatch_ts) * 0.25
         prompt = req.prompt_text or ""
         text = f"Mock response for tenant={req.tenant}, model={req.model}. Prompt={prompt[:80]}"
 
@@ -220,7 +243,7 @@ class MockBackendClient:
             arrival_ts=req.arrival_ts,
             dispatch_ts=dispatch_ts,
             finish_ts=finish_ts,
-            first_token_ts=finish_ts,
+            first_token_ts=first_token_ts,
             prompt_tokens=req.prompt_tokens,
             generated_tokens=min(req.max_tokens, 24),
             temperature=req.temperature,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from gateway.dispatcher.async_dispatcher import AsyncDispatcher
 from gateway.dispatcher.dispatcher import FIFODispatcher
 from gateway.dispatcher.dispatcher_drr import DRRDispatcher
 from gateway.dispatcher.dispatcher_wrr import WRRDispatcher
@@ -10,16 +11,17 @@ def build_dispatcher(
     policy: str = "fifo",
     tenant_weights: dict[str, int] | None = None,
     tenant_quanta: dict[str, int] | None = None,
+    max_concurrency: int = 32,
 ):
     policy = policy.lower()
 
     if policy == "fifo":
-        return FIFODispatcher(backend_client)
+        selector = FIFODispatcher()
+    elif policy == "wrr":
+        selector = WRRDispatcher(tenant_weights=tenant_weights)
+    elif policy == "drr":
+        selector = DRRDispatcher(tenant_quanta=tenant_quanta)
+    else:
+        raise ValueError(f"Unsupported dispatcher policy: {policy}")
 
-    if policy == "wrr":
-        return WRRDispatcher(backend_client, tenant_weights=tenant_weights)
-
-    if policy == "drr":
-        return DRRDispatcher(backend_client, tenant_quanta=tenant_quanta)
-
-    raise ValueError(f"Unsupported dispatcher policy: {policy}")
+    return AsyncDispatcher(selector, backend_client, max_concurrency=max_concurrency)

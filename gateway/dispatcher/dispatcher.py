@@ -1,22 +1,20 @@
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass
+from collections import deque
 
-from gateway.models import InferenceRequest, RequestResult
-
-
-@dataclass
-class DispatchResult:
-    result: RequestResult
-    dispatch_ts: float
+from gateway.models import InferenceRequest
 
 
 class FIFODispatcher:
-    def __init__(self, backend_client):
-        self.backend_client = backend_client
+    """FIFO admission policy: requests are served in arrival order."""
 
-    def dispatch(self, request: InferenceRequest) -> DispatchResult:
-        dispatch_ts = time.time()
-        result = self.backend_client.complete(request)
-        return DispatchResult(result=result, dispatch_ts=dispatch_ts)
+    def __init__(self) -> None:
+        self._queue: deque[InferenceRequest] = deque()
+
+    def enqueue(self, request: InferenceRequest) -> None:
+        self._queue.append(request)
+
+    def select_next(self) -> InferenceRequest:
+        if not self._queue:
+            raise RuntimeError("No queued requests available")
+        return self._queue.popleft()

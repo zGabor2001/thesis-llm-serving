@@ -1,66 +1,57 @@
 from __future__ import annotations
 
-import time
 from collections import deque
-from dataclasses import dataclass, field
 
-from gateway.models import InferenceRequest, RequestResult
-
-
-@dataclass
-class DispatchResult:
-    result: RequestResult
-    dispatch_ts: float
-
-
-@dataclass
-class TenantQueue:
-    tenant: str
-    weight: int
-    queue: deque = field(default_factory=deque)
-    deficit: int = 0
+from gateway.models import InferenceRequest
 
 
 class WRRDispatcher:
-    def __init__(self, backend_client, tenant_weights: dict[str, int] | None = None):
-        self.backend_client = backend_client
-        self.tenant_weights = tenant_weights or {
-            "tenant-a": 1,
-            "tenant-b": 1,
-            "tenant-c": 1,
-            "base-model": 1,
-        }
-        self.queues: dict[str, TenantQueue] = {}
-        for tenant, weight in self.tenant_weights.items():
-            self.queues[tenant] = TenantQueue(tenant=tenant, weight=weight)
+    """Weighted round-robin admission policy (request-based accounting).
+
+    Each request costs exactly one unit, regardless of its token count. At
+    every step the tenant with the lowest ``served / weight`` ratio is picked,
+    which yields a deterministic weighted round-robin schedule. Ties are broken
+    by tenant order (first declared wins).
+    """
+
+    DEFAULT_WEIGHTS = {
+        "tenant-a": 1,
+        "tenant-b": 1,
+        "tenant-c": 1,
+        "base-model": 1,
+    }
+
+    def __init__(self, tenant_weights: dict[str, int] | None = None):
+        self.tenant_weights = dict(tenant_weights) if tenant_weights else dict(self.DEFAULT_WEIGHTS)
+        self.queues: dict[str, deque] = {t: deque() for t in self.tenant_weights}
+        self.served: dict[str, int] = {t: 0 for t in self.tenant_weights}
+        self._order = list(self.tenant_weights.keys())
+
+    def _ensure_tenant(self, tenant: str) -> None:
+        if tenant not in self.queues:
+            self.tenant_weights[tenant] = self.tenant_weights.get(tenant, 1)
+            self.queues[tenant] = deque()
+            self.served[tenant] = 0
+            self._order.append(tenant)
 
     def enqueue(self, request: InferenceRequest) -> None:
-        tenant = request.tenant
-        if tenant not in self.queues:
-            weight = self.tenant_weights.get(tenant, 1)
-            self.queues[tenant] = TenantQueue(tenant=tenant, weight=weight)
-        self.queues[tenant].queue.append(request)
+        self._ensure_tenant(request.tenant)
+        self.queues[request.tenant].append(request)
 
-    def _next_tenant(self) -> str | None:
-        active_tenants = [t for t, q in self.queues.items() if len(q.queue) > 0]
-        if not active_tenants:
-            return None
+    def select_next(self) -> InferenceRequest:
+        best: str | None = None
+        best_ratio: float | None = None
 
-        while True:
-            for tenant in active_tenants:
-                q = self.queues[tenant]
-                if len(q.queue) > 0:
-                    return tenant
+        for tenant in self._order:
+            if not self.queues[tenant]:
+                continue
+            ratio = self.served[tenant] / self.tenant_weights[tenant]
+            if best is None or ratio < best_ratio:
+                best = tenant
+                best_ratio = ratio
 
-    def dispatch(self, request: InferenceRequest) -> DispatchResult:
-        self.enqueue(request)
-        tenant = self._next_tenant()
-        if tenant is None:
-            raise RuntimeError("No tenant available, but queue was non-empty")
+        if best is None:
+            raise RuntimeError("No queued requests available")
 
-        q = self.queues[tenant]
-        req = q.queue.popleft()
-
-        dispatch_ts = time.time()
-        result = self.backend_client.complete(req)
-        return DispatchResult(result=result, dispatch_ts=dispatch_ts)
+        self.served[best] += 1
+        return self.queues[best].popleft()

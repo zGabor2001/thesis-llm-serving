@@ -1,59 +1,71 @@
-import pytest
 import json
+from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 from fastapi.testclient import TestClient
 
-from gateway.models import InferenceRequest
-from gateway.vllm_client import MockBackendClient
-from gateway.proxy import build_app
-from gateway.request_logger import RequestLogger
+from gateway.config import GatewayConfig
+from gateway.dispatcher.async_dispatcher import AsyncDispatcher
 from gateway.dispatcher.dispatcher import FIFODispatcher
-from gateway.dispatcher.dispatcher_wrr import WRRDispatcher
 from gateway.dispatcher.dispatcher_drr import DRRDispatcher
 from gateway.dispatcher.dispatcher_factory import build_dispatcher
+from gateway.dispatcher.dispatcher_wrr import WRRDispatcher
+from gateway.models import InferenceRequest
+from gateway.proxy import build_app
+from gateway.request_logger import RequestLogger
+from gateway.vllm_client import MockBackendClient
 
 
-def test_build_dispatcher_fifo_returns_fifo_dispatcher():
-    backend = MockBackendClient(fixed_delay_s=0.0)
-    dispatcher = build_dispatcher(backend, policy="fifo")
-    assert isinstance(dispatcher, FIFODispatcher)
-
-
-def test_build_dispatcher_wrr_returns_wrr_dispatcher():
-    backend = MockBackendClient(fixed_delay_s=0.0)
-    dispatcher = build_dispatcher(
-        backend,
-        policy="wrr",
-        tenant_weights={"tenant-a": 2, "tenant-b": 1},
-    )
-    assert isinstance(dispatcher, WRRDispatcher)
-
-
-def test_build_dispatcher_unknown_policy_raises():
-    backend = MockBackendClient(fixed_delay_s=0.0)
-
-    with pytest.raises(ValueError, match="Unsupported dispatcher policy"):
-        build_dispatcher(backend, policy="unknown")
-
-
-def test_fifo_dispatcher_returns_result_and_dispatch_ts():
-    backend = MockBackendClient(fixed_delay_s=0.0)
-    dispatcher = FIFODispatcher(backend)
-
-    req = InferenceRequest(
-        request_id="req-1",
-        tenant="tenant-a",
+def _req(request_id: str, tenant: str, prompt_tokens: int = 8) -> InferenceRequest:
+    return InferenceRequest(
+        request_id=request_id,
+        tenant=tenant,
         model="base-model",
         arrival_ts=0.0,
-        messages=[{"role": "user", "content": "Hello"}],
+        messages=[{"role": "user", "content": f"Hello from {tenant}"}],
         max_tokens=16,
         adapter=None,
-        prompt_text="Hello",
-        prompt_tokens=5,
+        prompt_text=f"Hello from {tenant}",
+        prompt_tokens=prompt_tokens,
         temperature=0.0,
     )
 
-    out = dispatcher.dispatch(req)
+
+def test_build_dispatcher_fifo_returns_async_with_fifo_policy():
+    dispatcher = build_dispatcher(MockBackendClient(fixed_delay_s=0.0), policy="fifo")
+    assert isinstance(dispatcher, AsyncDispatcher)
+    assert isinstance(dispatcher.policy, FIFODispatcher)
+
+
+def test_build_dispatcher_wrr_returns_async_with_wrr_policy():
+    dispatcher = build_dispatcher(
+        MockBackendClient(fixed_delay_s=0.0),
+        policy="wrr",
+        tenant_weights={"tenant-a": 2, "tenant-b": 1},
+    )
+    assert isinstance(dispatcher, AsyncDispatcher)
+    assert isinstance(dispatcher.policy, WRRDispatcher)
+
+
+def test_build_dispatcher_drr_returns_async_with_drr_policy():
+    dispatcher = build_dispatcher(
+        MockBackendClient(fixed_delay_s=0.0),
+        policy="drr",
+        tenant_quanta={"tenant-a": 8, "tenant-b": 8},
+    )
+    assert isinstance(dispatcher, AsyncDispatcher)
+    assert isinstance(dispatcher.policy, DRRDispatcher)
+
+
+def test_build_dispatcher_unknown_policy_raises():
+    with pytest.raises(ValueError, match="Unsupported dispatcher policy"):
+        build_dispatcher(MockBackendClient(fixed_delay_s=0.0), policy="unknown")
+
+
+def test_async_dispatch_returns_result_and_dispatch_ts():
+    dispatcher = build_dispatcher(MockBackendClient(fixed_delay_s=0.0), policy="fifo")
+
+    out = dispatcher.dispatch(_req("req-1", "tenant-a"), timeout=5)
 
     assert out.result is not None
     assert out.result.request_id == "req-1"
@@ -61,36 +73,28 @@ def test_fifo_dispatcher_returns_result_and_dispatch_ts():
     assert out.dispatch_ts > 0
 
 
-def test_wrr_dispatcher_enqueues_and_dispatches():
-    backend = MockBackendClient(fixed_delay_s=0.0)
-    dispatcher = WRRDispatcher(backend, tenant_weights={"tenant-a": 1, "tenant-b": 1})
-
-    out = dispatcher.dispatch(_req("req-1", "tenant-a"))
-
-    assert out.result is not None
-    assert out.result.request_id == "req-1"
-    assert out.dispatch_ts > 0
+def test_build_app_uses_scheduler_mode_from_config():
+    # Regression: SCHEDULER_MODE must actually select the dispatcher policy.
+    cfg = GatewayConfig(scheduler_mode="drr")
+    app = build_app(config=cfg, backend_client=MockBackendClient(fixed_delay_s=0.0))
+    assert isinstance(app.state.dispatcher.policy, DRRDispatcher)
 
 
-def test_wrr_dispatcher_respects_weights_structure():
-    backend = MockBackendClient(fixed_delay_s=0.0)
-    dispatcher = WRRDispatcher(backend, tenant_weights={"tenant-a": 2, "tenant-b": 1})
+def test_concurrent_dispatch_returns_each_caller_its_own_result():
+    # Regression: a caller must never receive another request's result.
+    dispatcher = build_dispatcher(
+        MockBackendClient(fixed_delay_s=0.005),
+        policy="fifo",
+        max_concurrency=8,
+    )
+    requests = [_req(f"req-{i}", "tenant-a") for i in range(24)]
 
-    for t in ["tenant-a", "tenant-b"]:
-        req = InferenceRequest(
-            request_id="req-t1",
-            tenant=t,
-            model="base-model",
-            arrival_ts=0.0,
-            messages=[{"role": "user", "content": "Hello"}],
-            max_tokens=16,
-            adapter=None,
-            prompt_text="Hello",
-            prompt_tokens=5,
-            temperature=0.0,
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(
+            ex.map(lambda r: dispatcher.dispatch(r, timeout=5).result.request_id, requests)
         )
-        out = dispatcher.dispatch(req)
-        assert out.result is not None
+
+    assert sorted(results) == [r.request_id for r in sorted(requests, key=lambda r: r.request_id)]
 
 
 def test_chat_completions_endpoint_with_wrr_policy(tmp_path):
@@ -106,9 +110,7 @@ def test_chat_completions_endpoint_with_wrr_policy(tmp_path):
 
     payload = {
         "model": "base-model",
-        "messages": [
-            {"role": "user", "content": "Say hello in one sentence."}
-        ],
+        "messages": [{"role": "user", "content": "Say hello in one sentence."}],
         "max_tokens": 32,
         "temperature": 0.0,
         "tenant": "tenant-a",
@@ -125,7 +127,6 @@ def test_chat_completions_endpoint_with_wrr_policy(tmp_path):
 
     assert log_file.exists()
 
-    import json
     lines = log_file.read_text(encoding="utf-8").strip().splitlines()
     events = [json.loads(line) for line in lines]
 
@@ -134,6 +135,7 @@ def test_chat_completions_endpoint_with_wrr_policy(tmp_path):
     assert completed_event["tenant"] == "tenant-a"
     assert completed_event["model"] == "base-model"
     assert "dispatch_ts" in completed_event
+    assert "first_token_ts" in completed_event
 
 
 def test_wrr_policy_handles_multiple_tenants(tmp_path):
@@ -154,7 +156,6 @@ def test_wrr_policy_handles_multiple_tenants(tmp_path):
         "temperature": 0.0,
         "tenant": "tenant-a",
     }
-
     payload_b = {
         "model": "base-model",
         "messages": [{"role": "user", "content": "Hello from B"}],
@@ -185,55 +186,3 @@ def test_wrr_policy_handles_multiple_tenants(tmp_path):
         assert "dispatch_ts" in event
         assert event["dispatch_ts"] >= event["arrival_ts"]
         assert event["finish_ts"] >= event["dispatch_ts"]
-
-
-def _req(request_id: str, tenant: str, prompt_tokens: int = 8):
-    return InferenceRequest(
-        request_id=request_id,
-        tenant=tenant,
-        model="base-model",
-        arrival_ts=0.0,
-        messages=[{"role": "user", "content": f"Hello from {tenant}"}],
-        max_tokens=16,
-        adapter=None,
-        prompt_text=f"Hello from {tenant}",
-        prompt_tokens=prompt_tokens,
-        temperature=0.0,
-    )
-
-
-def test_wrr_dispatcher_handles_multiple_tenants():
-    backend = MockBackendClient(fixed_delay_s=0.0)
-    dispatcher = WRRDispatcher(backend, tenant_weights={"tenant-a": 2, "tenant-b": 1})
-
-    out1 = dispatcher.dispatch(_req("req-a1", "tenant-a"))
-    out2 = dispatcher.dispatch(_req("req-b1", "tenant-b"))
-    out3 = dispatcher.dispatch(_req("req-a2", "tenant-a"))
-
-    ids = {out1.result.request_id, out2.result.request_id, out3.result.request_id}
-    assert ids == {"req-a1", "req-b1", "req-a2"}
-
-
-def test_drr_dispatcher_dispatches_single_request():
-    backend = MockBackendClient(fixed_delay_s=0.0)
-    dispatcher = DRRDispatcher(backend, tenant_quanta={"tenant-a": 8})
-
-    out = dispatcher.dispatch(_req("req-a1", "tenant-a", prompt_tokens=4))
-
-    assert out.result.request_id == "req-a1"
-    assert out.dispatch_ts > 0
-
-
-def test_drr_dispatcher_handles_multiple_tenants_with_different_costs():
-    backend = MockBackendClient(fixed_delay_s=0.0)
-    dispatcher = DRRDispatcher(
-        backend,
-        tenant_quanta={"tenant-a": 8, "tenant-b": 8},
-    )
-
-    out1 = dispatcher.dispatch(_req("req-a1", "tenant-a", prompt_tokens=4))
-    out2 = dispatcher.dispatch(_req("req-b1", "tenant-b", prompt_tokens=12))
-    out3 = dispatcher.dispatch(_req("req-a2", "tenant-a", prompt_tokens=4))
-
-    ids = {out1.result.request_id, out2.result.request_id, out3.result.request_id}
-    assert ids == {"req-a1", "req-b1", "req-a2"}

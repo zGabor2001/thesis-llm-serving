@@ -4,6 +4,8 @@ import time
 import pytest
 import requests
 
+pytestmark = pytest.mark.integration
+
 BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:8000")
 TIMEOUT = int(os.getenv("VLLM_TEST_TIMEOUT", "120"))
 EXPECTED_MODELS = [
