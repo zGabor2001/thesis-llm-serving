@@ -56,5 +56,5 @@ else
 fi
 
 echo ""
-echo "LoRA adapters (tenant-a/b/c) are local artifacts and are not on the Hub."
-echo "Copy them into $MODEL_DIR/loras/<tenant>/ or re-train them."
+echo "LoRA adapters (tenant-a/b/c) are fixed input artifacts — see"
+echo "$MODEL_DIR/loras/README.md for provenance."

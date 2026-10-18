@@ -28,8 +28,11 @@ if command -v docker >/dev/null 2>&1; then
   docker save llm-gateway:latest -o "$SIF_DIR/llm-gateway.tar"
   apptainer build --force "$GATEWAY_SIF" docker-archive://"$SIF_DIR/llm-gateway.tar"
   rm -f "$SIF_DIR/llm-gateway.tar"
+elif [ -f "$PROJECT_ROOT/scripts/slurm/gateway.def" ]; then
+  echo "    (no docker — building directly from gateway.def)"
+  (cd "$PROJECT_ROOT" && apptainer build --force "$GATEWAY_SIF" scripts/slurm/gateway.def)
 else
-  echo "ERROR: docker not found. Build llm-gateway.sif elsewhere and place it at:" >&2
+  echo "ERROR: docker not found and no gateway.def. Build llm-gateway.sif elsewhere and place it at:" >&2
   echo "       $GATEWAY_SIF" >&2
   exit 1
 fi

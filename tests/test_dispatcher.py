@@ -80,6 +80,67 @@ def test_build_app_uses_scheduler_mode_from_config():
     assert isinstance(app.state.dispatcher.policy, DRRDispatcher)
 
 
+def test_build_app_uses_tenant_weights_from_config():
+    cfg = GatewayConfig(scheduler_mode="wrr", tenant_weights={"tenant-a": 3, "tenant-b": 1})
+    app = build_app(config=cfg, backend_client=MockBackendClient(fixed_delay_s=0.0))
+    assert app.state.dispatcher.policy.tenant_weights == {"tenant-a": 3, "tenant-b": 1}
+
+
+def test_build_app_uses_tenant_quanta_from_config():
+    cfg = GatewayConfig(scheduler_mode="drr", tenant_quanta={"tenant-a": 8, "tenant-b": 16})
+    app = build_app(config=cfg, backend_client=MockBackendClient(fixed_delay_s=0.0))
+    assert app.state.dispatcher.policy.tenant_quanta == {"tenant-a": 8, "tenant-b": 16}
+
+
+def test_tenant_routes_to_lora_adapter(tmp_path):
+    cfg = GatewayConfig(lora_tenants=["tenant-a"])
+    app = build_app(
+        config=cfg,
+        backend_client=MockBackendClient(fixed_delay_s=0.0),
+        logger=RequestLogger(tmp_path / "requests.jsonl"),
+    )
+    client = TestClient(app)
+
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 8,
+            "tenant": "tenant-a",
+        },
+    )
+
+    assert r.status_code == 200
+    assert r.json()["model"] == "tenant-a"
+
+
+def test_gateway_logs_cold_and_switch(tmp_path):
+    log_file = tmp_path / "requests.jsonl"
+    app = build_app(
+        backend_client=MockBackendClient(fixed_delay_s=0.0),
+        logger=RequestLogger(log_file),
+        scheduler_policy="fifo",
+    )
+    client = TestClient(app)
+
+    for tenant in ["tenant-a", "tenant-b", "tenant-a"]:
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 8,
+                "tenant": tenant,
+            },
+        )
+        assert r.status_code == 200
+
+    events = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
+    completed = [e for e in events if e["event_type"] == "request_completed"]
+
+    assert [e["cold"] for e in completed] == [True, True, False]
+    assert [e["switch"] for e in completed] == [False, True, True]
+
+
 def test_concurrent_dispatch_returns_each_caller_its_own_result():
     # Regression: a caller must never receive another request's result.
     dispatcher = build_dispatcher(

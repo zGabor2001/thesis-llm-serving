@@ -14,7 +14,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/slurm/common.sh"
 SCHEDULER_MODE="${SCHEDULER_MODE:-fifo}"
 CONCURRENCY="${CONCURRENCY:-8}"
 REQUESTS="${REQUESTS:-200}"
-TENANT="${TENANT:-tenant-a}"
+TENANTS="${TENANTS:-tenant-a:2,tenant-b:1,tenant-c:1}"
 
 # 1) vLLM backend
 if [ -f "$RUN_DIR/vllm.url" ] && wait_for_http "http://$(cat "$RUN_DIR/vllm.url")/health" 5; then
@@ -49,17 +49,18 @@ GATEWAY_URL="$(cat "$RUN_DIR/gateway.url")"
 wait_for_http "http://$GATEWAY_URL/health" 300
 echo "==> Gateway ready at $GATEWAY_URL"
 
-# 3) Load test
-echo "==> Running load generator ($REQUESTS requests @ $CONCURRENCY concurrency)"
-python3 "$(dirname "${BASH_SOURCE[0]}")/loadgen.py" \
-  --url "http://$GATEWAY_URL" \
-  --requests "$REQUESTS" \
-  --concurrency "$CONCURRENCY" \
-  --tenant "$TENANT"
+# 3) Load test (as a Slurm job — never on the login node)
+echo "==> Submitting load test ($REQUESTS requests @ $CONCURRENCY concurrency)"
+LOADGEN_JOB=$(sbatch --parsable \
+  --export=ALL,CONCURRENCY="$CONCURRENCY",REQUESTS="$REQUESTS",TENANTS="$TENANTS" \
+  "$(dirname "${BASH_SOURCE[0]}")/slurm/run-loadgen.sbatch")
+echo "    job id: $LOADGEN_JOB"
 
 echo ""
 echo "==> Done."
 echo "    Request log:  $LOG_DIR/requests.jsonl"
+echo "    Results:      $LOG_DIR/loadgen.jsonl"
 echo "    vLLM job:     $(cat "$RUN_DIR/vllm.jobid")"
 echo "    Gateway job:  $GATEWAY_JOB"
+echo "    Loadgen job:  $LOADGEN_JOB"
 echo "    Cleanup:      scancel $GATEWAY_JOB $(cat "$RUN_DIR/vllm.jobid")"

@@ -3,10 +3,10 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1
-#SBATCH --mem=64G
-#SBATCH --time=12:00:00
-#SBATCH --partition=gpu            # adjust to your site
+#SBATCH --gres=gpu:a40:1
+#SBATCH --mem=32G
+#SBATCH --time=04:00:00
+#SBATCH --partition=GPU-a40
 ##SBATCH --account=<your-account>  # uncomment if your site requires it
 ##SBATCH --qos=<your-qos>
 #SBATCH --output=%x-%j.out
@@ -27,6 +27,7 @@ trap cleanup EXIT
 
 echo "Starting vLLM: tensor-parallel=$TP_SIZE gpu-mem-util=$GPU_MEM_UTIL"
 
+START_TS="$(date +%s.%N)"
 apptainer exec --nv \
   --bind "$MODEL_ROOT:/models,$LOG_DIR:/logs,$PROJECT_ROOT/traces:/traces,$PROJECT_ROOT/configs:/configs" \
   "$SIF" vllm serve /models/base \
@@ -44,9 +45,12 @@ VLLM_PID=$!
 
 NODE="$(hostname)"
 if wait_for_http "http://$NODE:$VLLM_PORT/health" 900; then
+  READY_TS="$(date +%s.%N)"
+  LOAD_TIME_S="$(awk "BEGIN { printf \"%.3f\", $READY_TS - $START_TS }")"
   write_state vllm.url "$NODE:$VLLM_PORT"
   write_state vllm.jobid "$SLURM_JOB_ID"
-  echo "vLLM ready at $NODE:$VLLM_PORT (job=$SLURM_JOB_ID pid=$VLLM_PID)"
+  write_state vllm.load_time_s "$LOAD_TIME_S"
+  echo "vLLM ready at $NODE:$VLLM_PORT (job=$SLURM_JOB_ID load=${LOAD_TIME_S}s pid=$VLLM_PID)"
 else
   echo "ERROR: vLLM did not become ready" >&2
   kill "$VLLM_PID" || true

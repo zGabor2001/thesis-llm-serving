@@ -5,6 +5,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
+from gateway.dispatcher.residency import ResidencyTracker
 from gateway.models import InferenceRequest, RequestResult
 
 
@@ -27,6 +28,7 @@ class AsyncDispatcher:
     def __init__(self, policy, backend_client, max_concurrency: int = 32):
         self.policy = policy
         self.backend_client = backend_client
+        self.tracker = ResidencyTracker()
 
         self._condition = threading.Condition()
         self._slots = threading.Semaphore(max_concurrency)
@@ -69,12 +71,15 @@ class AsyncDispatcher:
             self._executor.submit(self._serve, request)
 
     def _serve(self, request: InferenceRequest) -> None:
+        cold_switch = self.tracker.mark(request.model or "unknown")
         try:
             result = self.backend_client.complete(request)
         except Exception as exc:  # noqa: BLE001 — keep the failure inside the result
             result = self._failure(request, exc)
         finally:
             self._slots.release()
+
+        result.metadata = {**result.metadata, **cold_switch}
 
         with self._condition:
             future = self._futures.pop(request.request_id, None)

@@ -13,6 +13,16 @@ SIF_DIR="${SIF_DIR:-$PROJECT_ROOT/images}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 GATEWAY_PORT="${GATEWAY_PORT:-8080}"
 
+# Scheduler / serving knobs (exported into the gateway container by
+# run-gateway.sbatch). Set these when submitting, e.g.:
+#   SCHEDULER_MODE=drr TENANT_QUANTA=tenant-a:8,tenant-b:8 sbatch ...
+SCHEDULER_MODE="${SCHEDULER_MODE:-fifo}"
+TENANT_WEIGHTS="${TENANT_WEIGHTS:-}"
+TENANT_QUANTA="${TENANT_QUANTA:-}"
+LORA_TENANTS="${LORA_TENANTS:-tenant-a,tenant-b,tenant-c}"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-32}"
+TOKENIZER_PATH="${TOKENIZER_PATH:-/models/base/tokenizer.json}"
+
 mkdir -p "$RUN_DIR" "$LOG_DIR" "$SIF_DIR"
 
 wait_for_http() {

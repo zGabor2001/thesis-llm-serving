@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from gateway.config import GatewayConfig
 from gateway.models import InferenceRequest
 from gateway.request_logger import RequestLogger
+from gateway.tokenizer import get_tokenizer
 from gateway.vllm_client import MockBackendClient, VLLMClient
 from gateway.dispatcher.dispatcher_factory import build_dispatcher
 
@@ -42,15 +43,6 @@ def build_prompt_text(messages: list[ChatMessage]) -> str:
     if user_parts:
         return "\n".join(user_parts)
     return "\n".join(m.content for m in messages)
-
-
-def estimate_tokens(text: str) -> int:
-    """Rough token-count estimate without a tokenizer dependency.
-
-    ~4 characters per token is a common heuristic for English text. This is
-    used as the DRR request cost; swap in a real tokenizer for production.
-    """
-    return max(1, (len(text) + 3) // 4)
 
 
 def to_openai_like_response(
@@ -99,12 +91,15 @@ def build_app(
     client = backend_client or make_backend_client(cfg)
     if logger is None:
         logger = RequestLogger()
+    tokenizer = get_tokenizer()
     policy = scheduler_policy or cfg.scheduler_mode
+    weights = tenant_weights if tenant_weights is not None else cfg.tenant_weights
+    quanta = tenant_quanta if tenant_quanta is not None else cfg.tenant_quanta
     dispatcher = build_dispatcher(
         client,
         policy=policy,
-        tenant_weights=tenant_weights,
-        tenant_quanta=tenant_quanta,
+        tenant_weights=weights,
+        tenant_quanta=quanta,
         max_concurrency=cfg.max_concurrency,
     )
 
@@ -143,7 +138,8 @@ def build_app(
         x_tenant_id: str | None = Header(default=None),
     ) -> dict[str, Any]:
         tenant = req.tenant or x_tenant_id or "default"
-        model = req.model or cfg.default_model
+        adapter = tenant if tenant in cfg.lora_tenants else None
+        model = req.model or adapter or cfg.default_model
         arrival_ts = time.time()
 
         prompt_text = build_prompt_text(req.messages)
@@ -151,13 +147,14 @@ def build_app(
             request_id=str(uuid.uuid4()),
             tenant=tenant,
             model=model,
+            adapter=adapter,
             arrival_ts=arrival_ts,
             messages=[m.model_dump() for m in req.messages],
             max_tokens=req.max_tokens,
             temperature=req.temperature,
             metadata=req.metadata,
             prompt_text=prompt_text,
-            prompt_tokens=estimate_tokens(prompt_text),
+            prompt_tokens=tokenizer.count_tokens(prompt_text),
         )
 
         logger.log(
@@ -167,6 +164,7 @@ def build_app(
             model=model,
             arrival_ts=arrival_ts,
             max_tokens=req.max_tokens,
+            scheduler=policy,
         )
 
         try:
@@ -189,6 +187,9 @@ def build_app(
                 first_token_ts=getattr(result, "first_token_ts", None),
                 prompt_tokens=getattr(result, "prompt_tokens", 0),
                 generated_tokens=getattr(result, "generated_tokens", 0),
+                cold=result.metadata.get("cold", False),
+                switch=result.metadata.get("switch", False),
+                scheduler=policy,
             )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Backend completion failed: {exc}") from exc
