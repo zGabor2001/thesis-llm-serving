@@ -13,7 +13,8 @@
 #SBATCH --error=%x-%j.err
 
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+source "$REPO_ROOT/scripts/slurm/common.sh"
 
 SIF="$SIF_DIR/vllm-openai.sif"
 [ -f "$SIF" ] || { echo "ERROR: missing $SIF — run scripts/build-apptainer.sh first" >&2; exit 1; }

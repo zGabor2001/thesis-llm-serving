@@ -5,13 +5,14 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=4G
 #SBATCH --time=01:00:00
-#SBATCH --partition=GPU-a40      # CPU-only (no --gres); adjust if a CPU partition exists
+#SBATCH --partition=CPU-amd
 ##SBATCH --account=<your-account>
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+source "$REPO_ROOT/scripts/slurm/common.sh"
 
 SIF="$SIF_DIR/llm-gateway.sif"
 [ -f "$SIF" ] || { echo "ERROR: missing $SIF — run scripts/build-apptainer.sh first" >&2; exit 1; }

@@ -35,8 +35,7 @@ echo "==> vLLM ready at $VLLM_URL"
 # 2) Gateway
 rm -f "$RUN_DIR/gateway.url"
 echo "==> Submitting gateway (scheduler=$SCHEDULER_MODE)"
-GATEWAY_JOB=$(sbatch --parsable \
-  --export=ALL,SCHEDULER_MODE="$SCHEDULER_MODE" \
+GATEWAY_JOB=$(SCHEDULER_MODE="$SCHEDULER_MODE" sbatch --parsable --export=ALL \
   "$(dirname "${BASH_SOURCE[0]}")/slurm/run-gateway.sbatch")
 echo "    job id: $GATEWAY_JOB"
 
@@ -51,9 +50,8 @@ echo "==> Gateway ready at $GATEWAY_URL"
 
 # 3) Load test (as a Slurm job — never on the login node)
 echo "==> Submitting load test ($REQUESTS requests @ $CONCURRENCY concurrency)"
-LOADGEN_JOB=$(sbatch --parsable \
-  --export=ALL,CONCURRENCY="$CONCURRENCY",REQUESTS="$REQUESTS",TENANTS="$TENANTS" \
-  "$(dirname "${BASH_SOURCE[0]}")/slurm/run-loadgen.sbatch")
+LOADGEN_JOB=$(CONCURRENCY="$CONCURRENCY" REQUESTS="$REQUESTS" TENANTS="$TENANTS" \
+  sbatch --parsable --export=ALL "$(dirname "${BASH_SOURCE[0]}")/slurm/run-loadgen.sbatch")
 echo "    job id: $LOADGEN_JOB"
 
 echo ""
